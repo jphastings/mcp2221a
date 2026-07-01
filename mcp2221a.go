@@ -323,6 +323,12 @@ func (mcp *MCP2221A) Close() error {
 // does not indicate success.
 // A nil slice and nil error are returned if the reset command is received and
 // successfully transmitted.
+//
+// TODO: this package is not safe for concurrent use. send() performs a USB
+// write/read pair that must not interleave with another goroutine's, and
+// I²C operations span multiple sends (status, cancel, write, poll). A mutex
+// on MCP2221A held for the duration of each public operation — not just each
+// send — is needed.
 func (mcp *MCP2221A) send(cmd byte, data []byte) ([]byte, error) {
 
 	if ok, err := mcp.valid(); !ok {
@@ -331,7 +337,7 @@ func (mcp *MCP2221A) send(cmd byte, data []byte) ([]byte, error) {
 
 	data[0] = cmd
 	if _, err := mcp.Device.Write(data); nil != err {
-		return nil, fmt.Errorf("Write([cmd=0x%02X]): %v", cmd, err)
+		return nil, fmt.Errorf("Write([cmd=0x%02X]): %w", cmd, err)
 	}
 
 	// logMsg(data)
@@ -343,7 +349,7 @@ func (mcp *MCP2221A) send(cmd byte, data []byte) ([]byte, error) {
 
 	rsp := makeMsg()
 	if recv, err := mcp.Device.Read(rsp); nil != err {
-		return nil, fmt.Errorf("Read([cmd=0x%02X]): %v", cmd, err)
+		return nil, fmt.Errorf("Read([cmd=0x%02X]): %w", cmd, err)
 	} else {
 		if recv < MsgSz {
 			return rsp, fmt.Errorf("Read([cmd=0x%02X]): short read (%d of %d bytes)", cmd, recv, MsgSz)
@@ -381,6 +387,9 @@ func (mcp *MCP2221A) Reset(timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
+	// TODO: this loop hot-spins on USB enumeration until the device reappears
+	// or the timeout expires; sleep briefly (e.g. 50 ms) between attempts. The
+	// timeout error message below should also name Reset, not New.
 	for mcp.Device == nil {
 		select {
 		case <-ctx.Done():
@@ -557,6 +566,9 @@ func (mcp *MCP2221A) FactorySerialNo() (string, error) {
 	if rsp, err := mcp.flash.read(subcmdSerialNo); nil != err {
 		return "", fmt.Errorf("read(): %w", err)
 	} else {
+		if rsp[2] < 2 { // corrupt response; length includes a 2-byte header
+			return "", nil
+		}
 		cnt := rsp[2] - 2
 		if cnt > MsgSz-4 {
 			cnt = MsgSz - 4
@@ -891,6 +903,10 @@ func parseFlashString(b []byte) string {
 
 	// 16-bit unicode (2 bytes per rune), starting at byte 4
 	const max byte = (MsgSz - 4) / 2
+
+	if b[2] < 2 { // corrupt response; length (byte 2) includes a 2-byte header
+		return ""
+	}
 
 	n := (b[2] - 2) / 2 // length stored at byte 2
 
@@ -2433,7 +2449,6 @@ func (mod *I2C) Write(stop bool, addr uint8, out []byte, cnt uint16) error {
 	}
 
 	pos := uint16(0)
-	retry := 0
 	for pos < cnt {
 
 		sz := cnt - pos
@@ -2441,22 +2456,19 @@ func (mod *I2C) Write(stop bool, addr uint8, out []byte, cnt uint16) error {
 			sz = i2cWriteMax
 		}
 
+		// every chunk repeats the same command and full transfer length; the
+		// device tracks its own progress through the declared transfer.
 		cmd := makeMsg()
 		cmd[1] = byte(cnt & 0xFF)
 		cmd[2] = byte((cnt >> 8) & 0xFF)
 		cmd[3] = byte(addr << 1)
-
-		sendCMD := cmdID
-		if pos+sz > cnt {
-			sendCMD = cmdI2CWriteNoStop
-		}
 
 		copy(cmd[4:], out[pos:pos+sz])
 
 		retry := 0
 		for retry < i2cWriteRetry {
 			retry++
-			if rsp, err := mod.send(sendCMD, cmd); nil != err {
+			if rsp, err := mod.send(cmdID, cmd); nil != err {
 				if nil != rsp {
 					if i2cStateNACK(rsp[2]) {
 						return fmt.Errorf("send(): I²C NACK from address (0x%02X)", addr)
@@ -2487,7 +2499,7 @@ func (mod *I2C) Write(stop bool, addr uint8, out []byte, cnt uint16) error {
 		}
 	}
 
-	retry = 0
+	retry := 0
 	for retry < i2cWriteRetry {
 		retry++
 		if stat, err := mod.status(); nil != err {
@@ -2598,6 +2610,10 @@ func (mod *I2C) Read(rep bool, addr uint8, cnt uint16) ([]byte, error) {
 			return nil, fmt.Errorf("too many retries")
 		}
 
+		// TODO: rsp[3] holds the number of bytes actually returned in this
+		// chunk; trust it instead of assuming the full requested size arrived.
+		// The retry loop above can break out of a partial read (state 0x54)
+		// with fewer bytes than sz, copying garbage and over-advancing pos.
 		if len(rsp) > 0 {
 			sz := cnt - pos
 			if sz > i2cReadMax {
@@ -2697,6 +2713,12 @@ func (mod *I2C) Scan(start uint8, stop uint8) ([]uint8, error) {
 		return nil, fmt.Errorf("invalid address range [%d, %d]", start, stop)
 	}
 
+	// TODO: probe with a zero-length write (START, address, STOP) instead of
+	// writing a 0x00 data byte, which resets most devices' register pointers
+	// and can perturb write-sensitive devices. The chip supports data-free
+	// write commands (the Linux hid-mcp2221 driver implements SMBus Quick
+	// this way), but Write() must first be restructured to issue a command
+	// when cnt is zero rather than returning early.
 	found := []byte{}
 	for addr := start; addr <= stop; addr++ {
 		if err := mod.I2C.Write(true, addr, []byte{0x00}, 1); nil == err {
