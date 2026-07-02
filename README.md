@@ -31,6 +31,9 @@ Go **[module](https://blog.golang.org/using-go-modules)** for the MCP2221A USB t
    - Convenience routines for reading registers from devices with 8-bit and 16-bit subaddressing
 - [x] Use any [TinyGo device driver](https://github.com/tinygo-org/drivers) over I²C
    - The I²C module implements the `tinygo.org/x/drivers` I2C interface (see below: **[Examples](#examples)**)
+- [x] Safe for concurrent use from multiple goroutines
+   - Although this module hosts TinyGo *drivers*, it targets standard Go on your computer — not TinyGo on a microcontroller — so goroutines are fully available: poll a sensor in one goroutine while driving GPIO from another
+   - Each device serializes its USB transactions, so multi-message operations (like an I²C write-then-read) are atomic
 
 Note that **UART support** is provided natively through the USB interface as a CDC device and is not handled by this module. It should show up in your OS as a regular TTY serial interface (`/dev/tty*` on Linux/macOS, COM on Windows).
 
