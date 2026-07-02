@@ -1,7 +1,7 @@
-[![GoDoc][docimg]][docurl]
+[![Go Reference][docimg]][docurl]
 
-[docimg]:https://godoc.org/github.com/ardnew/mcp2221a?status.svg
-[docurl]:https://godoc.org/github.com/ardnew/mcp2221a
+[docimg]:https://pkg.go.dev/badge/github.com/jphastings/mcp2221a.svg
+[docurl]:https://pkg.go.dev/github.com/jphastings/mcp2221a
 
 # mcp2221a
 Go **[module](https://blog.golang.org/using-go-modules)** for the MCP2221A USB to I²C/UART Protocol Converter with GPIO (**[datasheet](http://ww1.microchip.com/downloads/en/DeviceDoc/20005565B.pdf)**)
@@ -12,7 +12,7 @@ Go **[module](https://blog.golang.org/using-go-modules)** for the MCP2221A USB t
 > It also fixes I²C START/repeated-START sequencing, adds access to the interrupt-detection flag, and adds a hardware-free test suite.
 
 ## Features
-- [x] **[Fully-documented API](https://godoc.org/github.com/ardnew/mcp2221a)**
+- [x] **[Fully-documented API](https://pkg.go.dev/github.com/jphastings/mcp2221a)**
 - [x] Compliant Go module (see below: **[Installation](#installation)**)
 - [x] Supports multiple MCP2221A devices simultaneously
    - Define custom USB device VID/PID
@@ -40,20 +40,20 @@ Note that **UART support** is provided natively through the USB interface as a C
 ## Installation
 If you are not using Go modules (or are unsure), just use the `go` built-in package manager:
 ```sh
-go get -u -v github.com/ardnew/mcp2221a
+go get -u -v github.com/jphastings/mcp2221a
 ```
 
 #### Installation using modules
 Either use the built-in package manager as above (and drop the `-u`):
 ```sh
-go get -v github.com/ardnew/mcp2221a
+go get -v github.com/jphastings/mcp2221a
 ```
 
 Or simply add the import statement to your Go package's source code:
 ```go
 import (
   // ... other imports ...
-  mcp "github.com/ardnew/mcp2221a"
+  mcp "github.com/jphastings/mcp2221a"
 )
 ```
 The next time you run `go build`, the appropriate package will be downloaded automatically! Gee whiz!

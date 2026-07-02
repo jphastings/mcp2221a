@@ -1,4 +1,4 @@
-module github.com/ardnew/mcp2221a
+module github.com/jphastings/mcp2221a
 
 go 1.22.1
 
