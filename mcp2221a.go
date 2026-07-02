@@ -419,14 +419,11 @@ func (mcp *MCP2221A) Reset(timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	// TODO: this loop hot-spins on USB enumeration until the device reappears
-	// or the timeout expires; sleep briefly (e.g. 50 ms) between attempts. The
-	// timeout error message below should also name Reset, not New.
 	for mcp.Device == nil {
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("New([%d]): timed out (re)opening USB HID device", mcp.Index)
-		default:
+			return fmt.Errorf("Reset([%d]): timed out (re)opening USB HID device", mcp.Index)
+		case <-time.After(50 * time.Millisecond):
 			mcp.Device, _ = openUSBDevice(mcp.Index, mcp.VID, mcp.PID)
 		}
 	}
