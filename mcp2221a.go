@@ -23,7 +23,7 @@ import (
 const (
 	VersionPkg = "mcp2221a"
 	VersionMaj = 0
-	VersionMin = 4
+	VersionMin = 5
 	VersionPch = 0
 )
 
