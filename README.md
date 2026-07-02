@@ -24,6 +24,8 @@ Go **[module](https://blog.golang.org/using-go-modules)** for the MCP2221A USB t
 - [x] I²C read/write (configurable bit rate, up to 400 kHz)
    - I²C address scanner discovers all slaves on the bus
    - Convenience routines for reading registers from devices with 8-bit and 16-bit subaddressing
+- [x] Use any [TinyGo device driver](https://github.com/tinygo-org/drivers) over I²C
+   - The I²C module implements the `tinygo.org/x/drivers` I2C interface (see below: **[Examples](#examples)**)
 
 Note that **UART support** is provided natively through the USB interface as a CDC device and is not handled by this module. It should show up in your OS as a regular TTY serial interface (`/dev/tty*` on Linux/macOS, COM on Windows).
 
@@ -58,6 +60,8 @@ See [examples](examples) for some demo applications:
 - [ADC](examples/adc/main.go) - continuously reads and prints an analog value on GPIO pin GP1
 - [DAC](examples/dac/main.go) - continuously writes and prints an always-incrementing 5-bit value on GPIO pin GP2
 - [Flash](examples/flash/main.go) - prints the USB product descriptors from flash memory, and toggles power-up GPIO output value on pin GP0
+- [TinyGo drivers](examples/tinygo-drivers/main.go) - reads an Adafruit seesaw rotary encoder using its TinyGo device driver
+- [LED](examples/led/main.go) - blinks an LED on an I²C device using the register-based write convenience method
 
 ## Notes
 #### GP operating modes

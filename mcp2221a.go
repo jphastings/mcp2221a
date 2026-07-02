@@ -62,13 +62,13 @@ const (
 // response messages, both of which are always 64 bytes.
 func makeMsg() []byte { return make([]byte, MsgSz) }
 
-// logMsg pretty-prints a given byte slice using the default log object. Each
+// LogMsg pretty-prints a given byte slice using the default log object. Each
 // element is printed on its own line with the following format in columns of
 // uniform-width:
 //
 //	IDX: DEC {0xHEX} [0bBIN]
 func LogMsg(buf []byte) {
-	if nil == buf || len(buf) == 0 {
+	if len(buf) == 0 {
 		return
 	}
 	// calculate the number of digits in the final slice index
@@ -2046,6 +2046,49 @@ func (alt *INTCHG) GetConfig() (IntEdge, error) {
 	}
 }
 
+// Triggered reports whether the interrupt detection module has detected an
+// edge event since the flag was last cleared (see Clear() and SetConfig()).
+//
+// Returns false and an error if the receiver is invalid or if the device
+// status could not be read.
+func (alt *INTCHG) Triggered() (bool, error) {
+
+	if ok, err := alt.valid(); !ok {
+		return false, err
+	}
+
+	if stat, err := alt.status(); nil != err {
+		return false, fmt.Errorf("status(): %w", err)
+	} else {
+		return stat.interrupt > 0, nil
+	}
+}
+
+// Clear resets the interrupt detection flag without altering the configured
+// edge detection.
+//
+// Returns an error if the receiver is invalid or if the command could not be
+// sent.
+func (alt *INTCHG) Clear() error {
+
+	if ok, err := alt.valid(); !ok {
+		return err
+	}
+
+	cmd := makeMsg()
+
+	// set the detection alter bit (7) and the "clear interrupt detection" bit
+	// (0), leaving the edge configuration alter bits (2, 4) clear so the edge
+	// settings are unmodified.
+	cmd[6] = (1 << 7) | 1
+
+	if _, err := alt.send(cmdSRAMSet, cmd); nil != err {
+		return fmt.Errorf("send(): %w", err)
+	}
+
+	return nil
+}
+
 // -- LEDI2C -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -
 
 // LEDI2C contains the methods associated with the LED_I2C GP dedicated
@@ -2305,8 +2348,6 @@ const (
 	i2cStateAddrSend    byte = 0x21
 	i2cStateAddrTimeout byte = 0x23
 	i2cStateAddrNACK    byte = 0x25
-
-	i2cMaskAddrNACK byte = 0x40 //nolint:unused
 
 	i2cStatePartialData   byte = 0x41
 	i2cStateReadMore      byte = 0x43

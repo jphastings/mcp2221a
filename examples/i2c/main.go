@@ -13,7 +13,7 @@ func main() {
 	if nil != err {
 		log.Fatalf("Open(): %v", err)
 	}
-	defer m.Close()
+	defer func() { _ = m.Close() }()
 
 	log.Print(mcp.PackageVersion())
 
@@ -46,7 +46,7 @@ func main() {
 
 		// parse the data received, packing it into a 16-bit unsigned int. the
 		// INA260 returns data MSB-first.
-		var ub uint16 = (uint16(buf[0]) << 8) | uint16(buf[1])
+		ub := (uint16(buf[0]) << 8) | uint16(buf[1])
 
 		rev := ub & 0x0F // revision is 4 bits (LSB)
 		die := ub >> 4   // device ID is remaining 12 bits

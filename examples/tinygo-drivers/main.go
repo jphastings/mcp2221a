@@ -21,7 +21,7 @@ func main() {
 	if nil != err {
 		log.Fatalf("Open(): %v", err)
 	}
-	defer m.Close()
+	defer func() { _ = m.Close() }()
 
 	log.Print(mcp.PackageVersion())
 
