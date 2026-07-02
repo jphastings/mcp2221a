@@ -6,6 +6,11 @@
 # mcp2221a
 Go **[module](https://blog.golang.org/using-go-modules)** for the MCP2221A USB to I²C/UART Protocol Converter with GPIO (**[datasheet](http://ww1.microchip.com/downloads/en/DeviceDoc/20005565B.pdf)**)
 
+> [!NOTE]
+> This is a fork of [ardnew/mcp2221a](https://github.com/ardnew/mcp2221a) that primarily lets the MCP2221A host any [TinyGo device driver](https://github.com/tinygo-org/drivers) over I²C — the `I2C` module implements the `tinygo.org/x/drivers` interface, so drivers written for microcontrollers work unmodified from your desktop.
+> 
+> It also fixes I²C START/repeated-START sequencing, adds access to the interrupt-detection flag, and adds a hardware-free test suite.
+
 ## Features
 - [x] **[Fully-documented API](https://godoc.org/github.com/ardnew/mcp2221a)**
 - [x] Compliant Go module (see below: **[Installation](#installation)**)
@@ -87,13 +92,13 @@ All of the available operating modes for the general-purpose (GP) pins:
 ###### Supported modes
 However, only certain pins support each of the operating modes listed above — per the following matrix yanked from the datasheet:
 
-|             |**GP0**|**GP1**|**GP2**|**GP3**|
-|------------:|:-----:|:-----:|:-----:|:-----:|
-|  **Default**| GPIO  | GPIO  | GPIO  | GPIO  |
-|**Dedicated**| SSPND | CLKR  |USBCFG |LED_I2C|
-|    **Alt 1**|LED_URX| ADC1  | ADC2  | ADC3  |
-|    **Alt 2**|  --   |LED_UTX| DAC1  | DAC2  |
-|    **Alt 3**|  --   |  IOC  |  --   |  --   |
+|               | **GP0** | **GP1** | **GP2** | **GP3** |
+| ------------: | :-----: | :-----: | :-----: | :-----: |
+|   **Default** |  GPIO   |  GPIO   |  GPIO   |  GPIO   |
+| **Dedicated** |  SSPND  |  CLKR   | USBCFG  | LED_I2C |
+|     **Alt 1** | LED_URX |  ADC1   |  ADC2   |  ADC3   |
+|     **Alt 2** |   --    | LED_UTX |  DAC1   |  DAC2   |
+|     **Alt 3** |   --    |   IOC   |   --    |   --    |
 
 No idea why the first row of alternate functions is named **Dedicated**, that's how they are identified in the datasheet...
 
