@@ -24,6 +24,12 @@ type fakeDevice struct {
 	echo      bool
 	lastWrite byte
 
+	// when chunk is non-zero, each I²C get-data response carries at most that
+	// many bytes (with a read-partial state until the final chunk) — emulating
+	// a slow or clock-stretching target.
+	chunk  int
+	offset int
+
 	inFlight    atomic.Bool
 	interleaved atomic.Bool
 }
@@ -38,8 +44,11 @@ func (d *fakeDevice) Write(b []byte) (int, error) {
 	report := append([]byte(nil), b...)
 	d.reports = append(d.reports, report)
 
-	if report[0] == cmdI2CWrite || report[0] == cmdI2CWriteNoStop {
+	switch report[0] {
+	case cmdI2CWrite, cmdI2CWriteNoStop:
 		d.lastWrite = report[4]
+	case cmdI2CRead, cmdI2CReadRepStart:
+		d.offset = 0
 	}
 
 	rsp := make([]byte, MsgSz)
@@ -49,9 +58,17 @@ func (d *fakeDevice) Write(b []byte) (int, error) {
 		if d.echo {
 			data = []byte{d.lastWrite}
 		}
+
+		remaining := data[d.offset:]
 		rsp[2] = i2cStateReadComplete
-		rsp[3] = byte(len(data))
-		copy(rsp[4:], data)
+		if d.chunk > 0 && len(remaining) > d.chunk {
+			remaining = remaining[:d.chunk]
+			rsp[2] = i2cStateReadPartial
+		}
+		d.offset += len(remaining)
+
+		rsp[3] = byte(len(remaining))
+		copy(rsp[4:], remaining)
 	}
 	d.next = rsp
 	return len(b), nil
@@ -133,6 +150,37 @@ func TestTxPureWriteUsesStop(t *testing.T) {
 	cmds := dev.i2cCommands()
 	if !bytes.Equal(cmds, []byte{cmdI2CWrite}) {
 		t.Errorf("command sequence %X, want a single write-with-STOP 0x%02X", cmds, cmdI2CWrite)
+	}
+}
+
+func TestReadSpansChunks(t *testing.T) {
+	want := make([]byte, 100)
+	for i := range want {
+		want[i] = byte(i)
+	}
+	i2c, dev := newTestI2C(want)
+	dev.chunk = 60 // the device's per-response maximum
+
+	got, err := i2c.Read(false, 0x50, uint16(len(want)))
+	if err != nil {
+		t.Fatalf("Read(): %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("read %X, want %X", got, want)
+	}
+}
+
+func TestReadHonorsShortChunks(t *testing.T) {
+	want := []byte("a slow target trickles bytes")
+	i2c, dev := newTestI2C(want)
+	dev.chunk = 7 // smaller than the requested read
+
+	got, err := i2c.Read(false, 0x50, uint16(len(want)))
+	if err != nil {
+		t.Fatalf("Read(): %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("read %q, want %q", got, want)
 	}
 }
 

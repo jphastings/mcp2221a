@@ -2761,6 +2761,7 @@ func (mod *I2C) read(rep bool, addr uint8, cnt uint16) ([]byte, error) {
 	in := make([]byte, cnt)
 
 	pos := uint16(0)
+	stalls := 0
 	for pos < cnt {
 
 		var (
@@ -2794,18 +2795,29 @@ func (mod *I2C) read(rep bool, addr uint8, cnt uint16) ([]byte, error) {
 			return nil, fmt.Errorf("too many retries")
 		}
 
-		// TODO: rsp[3] holds the number of bytes actually returned in this
-		// chunk; trust it instead of assuming the full requested size arrived.
-		// The retry loop above can break out of a partial read (state 0x54)
-		// with fewer bytes than sz, copying garbage and over-advancing pos.
-		if len(rsp) > 0 {
-			sz := cnt - pos
-			if sz > i2cReadMax {
-				sz = i2cReadMax
-			}
-			copy(in[pos:], rsp[4:4+sz])
-			pos += sz
+		// the device reports how many bytes this chunk actually carries; a
+		// short chunk (e.g. a slow or clock-stretching target) just means the
+		// remainder arrives in later chunks.
+		sz := uint16(rsp[3])
+		if sz > i2cReadMax {
+			sz = i2cReadMax
 		}
+		if sz > cnt-pos {
+			sz = cnt - pos
+		}
+
+		if sz == 0 {
+			stalls++
+			if stalls >= i2cReadRetry {
+				return nil, fmt.Errorf("too many retries")
+			}
+			time.Sleep(300 * time.Microsecond)
+			continue
+		}
+		stalls = 0
+
+		copy(in[pos:], rsp[4:4+sz])
+		pos += sz
 	}
 
 	return in, nil
