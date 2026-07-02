@@ -22,8 +22,8 @@ import (
 const (
 	VersionPkg = "mcp2221a"
 	VersionMaj = 0
-	VersionMin = 3
-	VersionPch = 1
+	VersionMin = 4
+	VersionPch = 0
 )
 
 // Version returns the SemVer-compatible version string of this package.
