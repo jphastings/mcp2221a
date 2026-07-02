@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"sync"
 	"time"
 	"unicode/utf16"
 
@@ -150,11 +151,20 @@ const (
 // Pointers to structs representing each of the chip's modules are exported for
 // interacting with that component of the device.
 // Call Close() on the device when finished to also close the USB connection.
+//
+// An MCP2221A is safe for concurrent use: every public operation acquires an
+// internal mutex for its full duration, so multi-message transactions (such
+// as an I²C write-then-read) cannot be interleaved by other goroutines.
 type MCP2221A struct {
 	Device usb.Device
 	Index  byte
 	VID    uint16
 	PID    uint16
+
+	// mu serializes all USB traffic with the device. It is held for the whole
+	// of every public operation via lock(); unexported cores assume the caller
+	// holds it and must never lock it themselves.
+	mu sync.Mutex
 
 	// Locked indicates if the device is permanently locked, preventing
 	// write-access to the flash memory module.
@@ -273,6 +283,27 @@ func New(idx byte, vid uint16, pid uint16) (*MCP2221A, error) {
 	return mcp, nil
 }
 
+// lock acquires exclusive access to the device for the duration of a single
+// public operation, verifying the receiver and USB device while holding the
+// mutex.
+//
+// Returns the function that releases the mutex, or an error (with the mutex
+// released) if the receiver or USB device is invalid.
+func (mcp *MCP2221A) lock() (func(), error) {
+
+	if nil == mcp {
+		return nil, fmt.Errorf("nil MCP2221A")
+	}
+
+	mcp.mu.Lock()
+	if ok, err := mcp.valid(); !ok {
+		mcp.mu.Unlock()
+		return nil, err
+	}
+
+	return mcp.mu.Unlock, nil
+}
+
 // valid verifies the receiver and USB HID device are both not nil.
 //
 // Returns false with a descriptive error if any required field is nil.
@@ -295,12 +326,14 @@ func (mcp *MCP2221A) valid() (bool, error) {
 // gracefully.
 func (mcp *MCP2221A) Close() error {
 
-	if ok, err := mcp.valid(); !ok {
+	unlock, err := mcp.lock()
+	if nil != err {
 		return err
 	}
+	defer unlock()
 
 	// don't leave any I2C state machine status active
-	_ = mcp.I2C.Cancel()
+	_ = mcp.I2C.cancel()
 
 	mcp.locked, mcp.flash.writeable = true, false
 
@@ -324,11 +357,8 @@ func (mcp *MCP2221A) Close() error {
 // A nil slice and nil error are returned if the reset command is received and
 // successfully transmitted.
 //
-// TODO: this package is not safe for concurrent use. send() performs a USB
-// write/read pair that must not interleave with another goroutine's, and
-// I²C operations span multiple sends (status, cancel, write, poll). A mutex
-// on MCP2221A held for the duration of each public operation — not just each
-// send — is needed.
+// The caller must hold mcp.mu (see lock()) so that the write/read pair cannot
+// interleave with another goroutine's traffic.
 func (mcp *MCP2221A) send(cmd byte, data []byte) ([]byte, error) {
 
 	if ok, err := mcp.valid(); !ok {
@@ -369,9 +399,11 @@ func (mcp *MCP2221A) send(cmd byte, data []byte) ([]byte, error) {
 // sent, or if the device could not be reopened before the given timeout period.
 func (mcp *MCP2221A) Reset(timeout time.Duration) error {
 
-	if ok, err := mcp.valid(); !ok {
+	unlock, err := mcp.lock()
+	if nil != err {
 		return err
 	}
+	defer unlock()
 
 	cmd := makeMsg()
 	cmd[1] = 0xAB
@@ -505,9 +537,11 @@ func (mcp *MCP2221A) status() (*status, error) {
 // configuration could not be read.
 func (mcp *MCP2221A) USBManufacturer() (string, error) {
 
-	if ok, err := mcp.valid(); !ok {
+	unlock, err := mcp.lock()
+	if nil != err {
 		return "", err
 	}
+	defer unlock()
 
 	if rsp, err := mcp.flash.read(subcmdUSBMfgDesc); nil != err {
 		return "", fmt.Errorf("read(): %w", err)
@@ -523,9 +557,11 @@ func (mcp *MCP2221A) USBManufacturer() (string, error) {
 // configuration could not be read.
 func (mcp *MCP2221A) USBProduct() (string, error) {
 
-	if ok, err := mcp.valid(); !ok {
+	unlock, err := mcp.lock()
+	if nil != err {
 		return "", err
 	}
+	defer unlock()
 
 	if rsp, err := mcp.flash.read(subcmdUSBProdDesc); nil != err {
 		return "", fmt.Errorf("read(): %w", err)
@@ -541,9 +577,11 @@ func (mcp *MCP2221A) USBProduct() (string, error) {
 // configuration could not be read.
 func (mcp *MCP2221A) USBSerialNo() (string, error) {
 
-	if ok, err := mcp.valid(); !ok {
+	unlock, err := mcp.lock()
+	if nil != err {
 		return "", err
 	}
+	defer unlock()
 
 	if rsp, err := mcp.flash.read(subcmdUSBSerialNo); nil != err {
 		return "", fmt.Errorf("read(): %w", err)
@@ -559,9 +597,11 @@ func (mcp *MCP2221A) USBSerialNo() (string, error) {
 // configuration could not be read.
 func (mcp *MCP2221A) FactorySerialNo() (string, error) {
 
-	if ok, err := mcp.valid(); !ok {
+	unlock, err := mcp.lock()
+	if nil != err {
 		return "", err
 	}
+	defer unlock()
 
 	if rsp, err := mcp.flash.read(subcmdSerialNo); nil != err {
 		return "", fmt.Errorf("read(): %w", err)
@@ -596,9 +636,11 @@ func (mcp *MCP2221A) FactorySerialNo() (string, error) {
 // read from or written to flash memory.
 func (mcp *MCP2221A) ConfigVIDPID(vid uint16, pid uint16) error {
 
-	if ok, err := mcp.valid(); !ok {
+	unlock, err := mcp.lock()
+	if nil != err {
 		return err
 	}
+	defer unlock()
 
 	if cmd, err := mcp.flash.chipSettings(true); nil != err {
 		return fmt.Errorf("chipSettings(): %w", err)
@@ -629,9 +671,11 @@ func (mcp *MCP2221A) ConfigVIDPID(vid uint16, pid uint16) error {
 // read from or written to flash memory.
 func (mcp *MCP2221A) ConfigReqCurrent(ma uint16) error {
 
-	if ok, err := mcp.valid(); !ok {
+	unlock, err := mcp.lock()
+	if nil != err {
 		return err
 	}
+	defer unlock()
 
 	max := uint16(0xFF * 2)
 	req := uint16(ma + (ma & 1))
@@ -694,9 +738,11 @@ func unlockFlags(sec ChipSecurity) (bool, bool) {
 // incorrect, or if the flash has been permanently locked.
 func (mcp *MCP2221A) ConfigUnlock(pass []byte) (bool, error) {
 
-	if ok, err := mcp.valid(); !ok {
+	unlock, err := mcp.lock()
+	if nil != err {
 		return false, err
 	}
+	defer unlock()
 
 	if mcp.locked {
 		return false, fmt.Errorf("flash access permanently locked")
@@ -711,10 +757,7 @@ func (mcp *MCP2221A) ConfigUnlock(pass []byte) (bool, error) {
 	buf := make([]byte, PasswordLen)
 	copy(buf, pass)
 
-	var (
-		rsp []byte
-		err error
-	)
+	var rsp []byte
 
 	cmd := makeMsg()
 	copy(cmd[2:], buf)
@@ -1133,9 +1176,17 @@ const (
 // not be sent.
 func (mod *GPIO) SetConfig(pin byte, val byte, mode GPIOMode, dir GPIODir) error {
 
-	if ok, err := mod.valid(); !ok {
+	unlock, err := mod.lock()
+	if nil != err {
 		return err
 	}
+	defer unlock()
+
+	return mod.setConfig(pin, val, mode, dir)
+}
+
+// setConfig implements SetConfig. The caller must hold mcp.mu.
+func (mod *GPIO) setConfig(pin byte, val byte, mode GPIOMode, dir GPIODir) error {
 
 	if pin >= GPPinCount {
 		return fmt.Errorf("invalid GPIO pin: %d", pin)
@@ -1171,16 +1222,24 @@ func (mod *GPIO) SetConfig(pin byte, val byte, mode GPIOMode, dir GPIODir) error
 // not be sent.
 func (mod *GPIO) FlashConfig(pin byte, val byte, mode GPIOMode, dir GPIODir) error {
 
-	if ok, err := mod.valid(); !ok {
+	unlock, err := mod.lock()
+	if nil != err {
 		return err
 	}
+	defer unlock()
+
+	return mod.flashConfig(pin, val, mode, dir)
+}
+
+// flashConfig implements FlashConfig. The caller must hold mcp.mu.
+func (mod *GPIO) flashConfig(pin byte, val byte, mode GPIOMode, dir GPIODir) error {
 
 	if pin >= GPPinCount {
 		return fmt.Errorf("invalid GPIO pin: %d", pin)
 	}
 
-	if err := mod.SetConfig(pin, val, mode, dir); nil != err {
-		return fmt.Errorf("SetConfig(): %w", err)
+	if err := mod.setConfig(pin, val, mode, dir); nil != err {
+		return fmt.Errorf("setConfig(): %w", err)
 	}
 
 	cmd := makeMsg()
@@ -1207,9 +1266,11 @@ func (mod *GPIO) FlashConfig(pin byte, val byte, mode GPIOMode, dir GPIODir) err
 // the current configuration could not be read.
 func (mod *GPIO) GetConfig(pin byte) (byte, GPIOMode, GPIODir, error) {
 
-	if ok, err := mod.valid(); !ok {
+	unlock, err := mod.lock()
+	if nil != err {
 		return WordClr, ModeInvalid, DirInvalid, err
 	}
+	defer unlock()
 
 	if pin >= GPPinCount {
 		return WordClr, ModeInvalid, DirInvalid, fmt.Errorf("invalid GPIO pin: %d", pin)
@@ -1231,9 +1292,11 @@ func (mod *GPIO) GetConfig(pin byte) (byte, GPIOMode, GPIODir, error) {
 // the pin value could not be set (e.g. pin not configured for GPIO operation).
 func (mod *GPIO) Set(pin byte, val byte) error {
 
-	if ok, err := mod.valid(); !ok {
+	unlock, err := mod.lock()
+	if nil != err {
 		return err
 	}
+	defer unlock()
 
 	if pin >= GPPinCount {
 		return fmt.Errorf("invalid GPIO pin: %d", pin)
@@ -1260,9 +1323,11 @@ func (mod *GPIO) Set(pin byte, val byte) error {
 // the pin value could not be set (e.g. pin not configured for GPIO operation).
 func (mod *GPIO) Get(pin byte) (byte, error) {
 
-	if ok, err := mod.valid(); !ok {
+	unlock, err := mod.lock()
+	if nil != err {
 		return WordClr, err
 	}
+	defer unlock()
 
 	if pin >= GPPinCount {
 		return WordClr, fmt.Errorf("invalid GPIO pin: %d", pin)
@@ -1301,9 +1366,11 @@ type ADC struct {
 // ADC channel, ref is invalid, or if the new configuration could not be sent.
 func (mod *ADC) SetConfig(pin byte, ref VRef) error {
 
-	if ok, err := mod.valid(); !ok {
+	unlock, err := mod.lock()
+	if nil != err {
 		return err
 	}
+	defer unlock()
 
 	if pin >= GPPinCount {
 		return fmt.Errorf("invalid GPIO pin: %d", pin)
@@ -1317,7 +1384,7 @@ func (mod *ADC) SetConfig(pin byte, ref VRef) error {
 		return fmt.Errorf("invalid reference voltage: %d", ref)
 	}
 
-	if err := mod.GPIO.SetConfig(pin, WordClr, ModeADC, DirInput); nil != err {
+	if err := mod.GPIO.setConfig(pin, WordClr, ModeADC, DirInput); nil != err {
 		return fmt.Errorf("GPIO.SetConfig(): %w", err)
 	}
 
@@ -1342,9 +1409,11 @@ func (mod *ADC) SetConfig(pin byte, ref VRef) error {
 // ADC channel, ref is invalid, or if the new configuration could not be sent.
 func (mod *ADC) FlashConfig(pin byte, ref VRef) error {
 
-	if ok, err := mod.valid(); !ok {
+	unlock, err := mod.lock()
+	if nil != err {
 		return err
 	}
+	defer unlock()
 
 	if pin >= GPPinCount {
 		return fmt.Errorf("invalid GPIO pin: %d", pin)
@@ -1358,7 +1427,7 @@ func (mod *ADC) FlashConfig(pin byte, ref VRef) error {
 		return fmt.Errorf("invalid reference voltage: %d", ref)
 	}
 
-	if err := mod.GPIO.FlashConfig(pin, WordClr, ModeADC, DirInput); nil != err {
+	if err := mod.GPIO.flashConfig(pin, WordClr, ModeADC, DirInput); nil != err {
 		return fmt.Errorf("GPIO.FlashConfig(): %w", err)
 	}
 
@@ -1383,9 +1452,11 @@ func (mod *ADC) FlashConfig(pin byte, ref VRef) error {
 // invalid, pin is invalid, or if the current configuration could not be read.
 func (mod *ADC) GetConfig(pin byte) (VRef, error) {
 
-	if ok, err := mod.valid(); !ok {
+	unlock, err := mod.lock()
+	if nil != err {
 		return VRefDefault, err
 	}
+	defer unlock()
 
 	if pin >= GPPinCount {
 		return VRefDefault, fmt.Errorf("invalid GPIO pin: %d", pin)
@@ -1411,9 +1482,11 @@ func (mod *ADC) GetConfig(pin byte) (VRef, error) {
 // configuration could not be sent.
 func (mod *ADC) Read(pin byte) (uint16, error) {
 
-	if ok, err := mod.valid(); !ok {
+	unlock, err := mod.lock()
+	if nil != err {
 		return 0, err
 	}
+	defer unlock()
 
 	if pin >= GPPinCount {
 		return 0, fmt.Errorf("invalid GPIO pin: %d", pin)
@@ -1455,9 +1528,11 @@ type DAC struct {
 // DAC output, ref is invalid, or if the new configuration could not be sent.
 func (mod *DAC) SetConfig(pin byte, ref VRef) error {
 
-	if ok, err := mod.valid(); !ok {
+	unlock, err := mod.lock()
+	if nil != err {
 		return err
 	}
+	defer unlock()
 
 	if pin >= GPPinCount {
 		return fmt.Errorf("invalid GPIO pin: %d", pin)
@@ -1471,7 +1546,7 @@ func (mod *DAC) SetConfig(pin byte, ref VRef) error {
 		return fmt.Errorf("invalid reference voltage: %d", ref)
 	}
 
-	if err := mod.GPIO.SetConfig(pin, WordClr, ModeDAC, DirOutput); nil != err {
+	if err := mod.GPIO.setConfig(pin, WordClr, ModeDAC, DirOutput); nil != err {
 		return fmt.Errorf("GPIO.SetConfig(): %w", err)
 	}
 
@@ -1496,9 +1571,11 @@ func (mod *DAC) SetConfig(pin byte, ref VRef) error {
 // DAC output, ref is invalid, or if the new configuration could not be sent.
 func (mod *DAC) FlashConfig(pin byte, ref VRef, val byte) error {
 
-	if ok, err := mod.valid(); !ok {
+	unlock, err := mod.lock()
+	if nil != err {
 		return err
 	}
+	defer unlock()
 
 	if pin >= GPPinCount {
 		return fmt.Errorf("invalid GPIO pin: %d", pin)
@@ -1512,7 +1589,7 @@ func (mod *DAC) FlashConfig(pin byte, ref VRef, val byte) error {
 		return fmt.Errorf("invalid reference voltage: %d", ref)
 	}
 
-	if err := mod.GPIO.FlashConfig(pin, WordClr, ModeDAC, DirOutput); nil != err {
+	if err := mod.GPIO.flashConfig(pin, WordClr, ModeDAC, DirOutput); nil != err {
 		return fmt.Errorf("GPIO.FlashConfig(): %w", err)
 	}
 
@@ -1537,9 +1614,11 @@ func (mod *DAC) FlashConfig(pin byte, ref VRef, val byte) error {
 // operation, or if the current configuration could not be read.
 func (mod *DAC) GetConfig(pin byte) (byte, VRef, error) {
 
-	if ok, err := mod.valid(); !ok {
+	unlock, err := mod.lock()
+	if nil != err {
 		return WordClr, VRefDefault, err
 	}
+	defer unlock()
 
 	if pin >= GPPinCount {
 		return WordClr, VRefDefault, fmt.Errorf("invalid GPIO pin: %d", pin)
@@ -1568,9 +1647,11 @@ func (mod *DAC) GetConfig(pin byte) (byte, VRef, error) {
 // not be sent.
 func (mod *DAC) Write(val byte) error {
 
-	if ok, err := mod.valid(); !ok {
+	unlock, err := mod.lock()
+	if nil != err {
 		return err
 	}
+	defer unlock()
 
 	cmd := makeMsg()
 
@@ -1638,11 +1719,13 @@ type SUSPND struct {
 // not be set, or the flash settings could not be read from or written to.
 func (alt *SUSPND) FlashConfig(pol Polarity) error {
 
-	if ok, err := alt.valid(); !ok {
+	unlock, err := alt.lock()
+	if nil != err {
 		return err
 	}
+	defer unlock()
 
-	if err := alt.GPIO.FlashConfig(pinSUSPND, WordClr, ModeSUSPND, DirOutput); nil != err {
+	if err := alt.GPIO.flashConfig(pinSUSPND, WordClr, ModeSUSPND, DirOutput); nil != err {
 		return fmt.Errorf("GPIO.FlashConfig(): %w", err)
 	}
 
@@ -1679,9 +1762,11 @@ func (alt *SUSPND) FlashConfig(pol Polarity) error {
 // configuration could not be read.
 func (alt *SUSPND) GetConfig() (Polarity, error) {
 
-	if ok, err := alt.valid(); !ok {
+	unlock, err := alt.lock()
+	if nil != err {
 		return false, err
 	}
+	defer unlock()
 
 	if buf, err := alt.sram.readRange(4, 4); nil != err {
 		return false, fmt.Errorf("sram.readRange(): %w", err)
@@ -1747,9 +1832,11 @@ func isClkOutValid(c ClkOut) bool {
 // could not be set.
 func (alt *CLKOUT) SetConfig(clk ClkOut, dut DutyCycle) error {
 
-	if ok, err := alt.valid(); !ok {
+	unlock, err := alt.lock()
+	if nil != err {
 		return err
 	}
+	defer unlock()
 
 	if !isClkOutValid(clk) {
 		return fmt.Errorf("invalid clock output: %d", clk)
@@ -1759,7 +1846,7 @@ func (alt *CLKOUT) SetConfig(clk ClkOut, dut DutyCycle) error {
 		return fmt.Errorf("invalid duty cycle: %d", dut)
 	}
 
-	if err := alt.GPIO.SetConfig(pinCLKOUT, WordClr, ModeCLKOUT, DirOutput); nil != err {
+	if err := alt.GPIO.setConfig(pinCLKOUT, WordClr, ModeCLKOUT, DirOutput); nil != err {
 		return fmt.Errorf("GPIO.SetConfig(): %w", err)
 	}
 
@@ -1786,9 +1873,11 @@ func (alt *CLKOUT) SetConfig(clk ClkOut, dut DutyCycle) error {
 // could not be read from or written to flash memory.
 func (alt *CLKOUT) FlashConfig(clk ClkOut, dut DutyCycle) error {
 
-	if ok, err := alt.valid(); !ok {
+	unlock, err := alt.lock()
+	if nil != err {
 		return err
 	}
+	defer unlock()
 
 	if !isClkOutValid(clk) {
 		return fmt.Errorf("invalid clock output: %d", clk)
@@ -1798,7 +1887,7 @@ func (alt *CLKOUT) FlashConfig(clk ClkOut, dut DutyCycle) error {
 		return fmt.Errorf("invalid duty cycle: %d", dut)
 	}
 
-	if err := alt.GPIO.FlashConfig(pinCLKOUT, WordClr, ModeCLKOUT, DirOutput); nil != err {
+	if err := alt.GPIO.flashConfig(pinCLKOUT, WordClr, ModeCLKOUT, DirOutput); nil != err {
 		return fmt.Errorf("GPIO.FlashConfig(): %w", err)
 	}
 
@@ -1824,9 +1913,11 @@ func (alt *CLKOUT) FlashConfig(clk ClkOut, dut DutyCycle) error {
 // current configuration could not be read.
 func (alt *CLKOUT) GetConfig() (ClkOut, DutyCycle, error) {
 
-	if ok, err := alt.valid(); !ok {
+	unlock, err := alt.lock()
+	if nil != err {
 		return ClkRes, Duty0Pct, err
 	}
+	defer unlock()
 
 	if buf, err := alt.sram.readRange(5, 5); nil != err {
 		return ClkRes, Duty0Pct, fmt.Errorf("sram.readRange(): %w", err)
@@ -1857,11 +1948,13 @@ type USBCFG struct {
 // not be set, or the flash settings could not be read from or written to.
 func (alt *USBCFG) FlashConfig(pol Polarity) error {
 
-	if ok, err := alt.valid(); !ok {
+	unlock, err := alt.lock()
+	if nil != err {
 		return err
 	}
+	defer unlock()
 
-	if err := alt.GPIO.FlashConfig(pinUSBCFG, WordClr, ModeUSBCFG, DirOutput); nil != err {
+	if err := alt.GPIO.flashConfig(pinUSBCFG, WordClr, ModeUSBCFG, DirOutput); nil != err {
 		return fmt.Errorf("GPIO.FlashConfig(): %w", err)
 	}
 
@@ -1899,9 +1992,11 @@ func (alt *USBCFG) FlashConfig(pol Polarity) error {
 // configuration could not be read.
 func (alt *USBCFG) GetConfig() (Polarity, error) {
 
-	if ok, err := alt.valid(); !ok {
+	unlock, err := alt.lock()
+	if nil != err {
 		return false, err
 	}
+	defer unlock()
 
 	if buf, err := alt.sram.readRange(4, 4); nil != err {
 		return false, fmt.Errorf("sram.readRange(): %w", err)
@@ -1940,15 +2035,17 @@ const (
 // could not be cleared.
 func (alt *INTCHG) SetConfig(edge IntEdge) error {
 
-	if ok, err := alt.valid(); !ok {
+	unlock, err := alt.lock()
+	if nil != err {
 		return err
 	}
+	defer unlock()
 
 	if edge > RisingFallingEdge {
 		return fmt.Errorf("invalid interrupt detection edge: %d", edge)
 	}
 
-	if err := alt.GPIO.SetConfig(pinINTCHG, WordClr, ModeINTCHG, DirInput); nil != err {
+	if err := alt.GPIO.setConfig(pinINTCHG, WordClr, ModeINTCHG, DirInput); nil != err {
 		return fmt.Errorf("GPIO.SetConfig(): %w", err)
 	}
 
@@ -2001,15 +2098,17 @@ func (alt *INTCHG) SetConfig(edge IntEdge) error {
 // could not be cleared.
 func (alt *INTCHG) FlashConfig(edge IntEdge) error {
 
-	if ok, err := alt.valid(); !ok {
+	unlock, err := alt.lock()
+	if nil != err {
 		return err
 	}
+	defer unlock()
 
 	if edge > RisingFallingEdge {
 		return fmt.Errorf("invalid interrupt detection edge: %d", edge)
 	}
 
-	if err := alt.GPIO.FlashConfig(pinINTCHG, WordClr, ModeINTCHG, DirInput); nil != err {
+	if err := alt.GPIO.flashConfig(pinINTCHG, WordClr, ModeINTCHG, DirInput); nil != err {
 		return fmt.Errorf("GPIO.FlashConfig(): %w", err)
 	}
 
@@ -2034,9 +2133,11 @@ func (alt *INTCHG) FlashConfig(edge IntEdge) error {
 // if the current configuration could not be read.
 func (alt *INTCHG) GetConfig() (IntEdge, error) {
 
-	if ok, err := alt.valid(); !ok {
+	unlock, err := alt.lock()
+	if nil != err {
 		return NoInterrupt, err
 	}
+	defer unlock()
 
 	if buf, err := alt.sram.readRange(7, 7); nil != err {
 		return NoInterrupt, fmt.Errorf("sram.readRange(): %w", err)
@@ -2053,9 +2154,11 @@ func (alt *INTCHG) GetConfig() (IntEdge, error) {
 // status could not be read.
 func (alt *INTCHG) Triggered() (bool, error) {
 
-	if ok, err := alt.valid(); !ok {
+	unlock, err := alt.lock()
+	if nil != err {
 		return false, err
 	}
+	defer unlock()
 
 	if stat, err := alt.status(); nil != err {
 		return false, fmt.Errorf("status(): %w", err)
@@ -2071,9 +2174,11 @@ func (alt *INTCHG) Triggered() (bool, error) {
 // sent.
 func (alt *INTCHG) Clear() error {
 
-	if ok, err := alt.valid(); !ok {
+	unlock, err := alt.lock()
+	if nil != err {
 		return err
 	}
+	defer unlock()
 
 	cmd := makeMsg()
 
@@ -2110,11 +2215,13 @@ type LEDI2C struct {
 // not be set, or the flash settings could not be read from or written to.
 func (alt *LEDI2C) FlashConfig(pol Polarity) error {
 
-	if ok, err := alt.valid(); !ok {
+	unlock, err := alt.lock()
+	if nil != err {
 		return err
 	}
+	defer unlock()
 
-	if err := alt.GPIO.FlashConfig(pinLEDI2C, WordClr, ModeLEDI2C, DirOutput); nil != err {
+	if err := alt.GPIO.flashConfig(pinLEDI2C, WordClr, ModeLEDI2C, DirOutput); nil != err {
 		return fmt.Errorf("GPIO.FlashConfig(): %w", err)
 	}
 
@@ -2152,9 +2259,11 @@ func (alt *LEDI2C) FlashConfig(pol Polarity) error {
 // configuration could not be read.
 func (alt *LEDI2C) GetConfig() (Polarity, error) {
 
-	if ok, err := alt.valid(); !ok {
+	unlock, err := alt.lock()
+	if nil != err {
 		return false, err
 	}
+	defer unlock()
 
 	if buf, err := alt.sram.readRange(4, 4); nil != err {
 		return false, fmt.Errorf("sram.readRange(): %w", err)
@@ -2185,11 +2294,13 @@ type LEDURX struct {
 // not be set, or the flash settings could not be read from or written to.
 func (alt *LEDURX) FlashConfig(pol Polarity) error {
 
-	if ok, err := alt.valid(); !ok {
+	unlock, err := alt.lock()
+	if nil != err {
 		return err
 	}
+	defer unlock()
 
-	if err := alt.GPIO.FlashConfig(pinLEDURX, WordClr, ModeLEDURX, DirOutput); nil != err {
+	if err := alt.GPIO.flashConfig(pinLEDURX, WordClr, ModeLEDURX, DirOutput); nil != err {
 		return fmt.Errorf("GPIO.FlashConfig(): %w", err)
 	}
 
@@ -2227,9 +2338,11 @@ func (alt *LEDURX) FlashConfig(pol Polarity) error {
 // configuration could not be read.
 func (alt *LEDURX) GetConfig() (Polarity, error) {
 
-	if ok, err := alt.valid(); !ok {
+	unlock, err := alt.lock()
+	if nil != err {
 		return false, err
 	}
+	defer unlock()
 
 	if buf, err := alt.sram.readRange(4, 4); nil != err {
 		return false, fmt.Errorf("sram.readRange(): %w", err)
@@ -2260,11 +2373,13 @@ type LEDUTX struct {
 // not be set, or the flash settings could not be read from or written to.
 func (alt *LEDUTX) FlashConfig(pol Polarity) error {
 
-	if ok, err := alt.valid(); !ok {
+	unlock, err := alt.lock()
+	if nil != err {
 		return err
 	}
+	defer unlock()
 
-	if err := alt.GPIO.FlashConfig(pinLEDUTX, WordClr, ModeLEDUTX, DirOutput); nil != err {
+	if err := alt.GPIO.flashConfig(pinLEDUTX, WordClr, ModeLEDUTX, DirOutput); nil != err {
 		return fmt.Errorf("GPIO.FlashConfig(): %w", err)
 	}
 
@@ -2302,9 +2417,11 @@ func (alt *LEDUTX) FlashConfig(pol Polarity) error {
 // configuration could not be read.
 func (alt *LEDUTX) GetConfig() (Polarity, error) {
 
-	if ok, err := alt.valid(); !ok {
+	unlock, err := alt.lock()
+	if nil != err {
 		return false, err
 	}
+	defer unlock()
 
 	if buf, err := alt.sram.readRange(4, 4); nil != err {
 		return false, fmt.Errorf("sram.readRange(): %w", err)
@@ -2392,9 +2509,11 @@ func i2cStateTimeout(state byte) bool {
 // currently in-progress.
 func (mod *I2C) SetConfig(baud uint32) error {
 
-	if ok, err := mod.valid(); !ok {
+	unlock, err := mod.lock()
+	if nil != err {
 		return err
 	}
+	defer unlock()
 
 	if baud > ClkHz/3 || baud < ClkHz/258 {
 		return fmt.Errorf("invalid baud rate: %d", baud)
@@ -2425,9 +2544,17 @@ func (mod *I2C) SetConfig(baud uint32) error {
 // sent.
 func (mod *I2C) Cancel() error {
 
-	if ok, err := mod.valid(); !ok {
+	unlock, err := mod.lock()
+	if nil != err {
 		return err
 	}
+	defer unlock()
+
+	return mod.cancel()
+}
+
+// cancel implements Cancel. The caller must hold mcp.mu.
+func (mod *I2C) cancel() error {
 
 	cmd := makeMsg()
 	cmd[2] = 0x10
@@ -2457,9 +2584,17 @@ func (mod *I2C) Cancel() error {
 // state, or too many retries were attempted.
 func (mod *I2C) Write(stop bool, addr uint8, out []byte, cnt uint16) error {
 
-	if ok, err := mod.valid(); !ok {
+	unlock, err := mod.lock()
+	if nil != err {
 		return err
 	}
+	defer unlock()
+
+	return mod.write(stop, addr, out, cnt)
+}
+
+// write implements Write. The caller must hold mcp.mu.
+func (mod *I2C) write(stop bool, addr uint8, out []byte, cnt uint16) error {
 
 	if cnt <= 0 {
 		return nil
@@ -2479,8 +2614,8 @@ func (mod *I2C) Write(stop bool, addr uint8, out []byte, cnt uint16) error {
 	}
 
 	if WordClr != stat.i2cState {
-		if err := mod.I2C.Cancel(); nil != err {
-			return fmt.Errorf("I2C.Cancel(): %w", err)
+		if err := mod.I2C.cancel(); nil != err {
+			return fmt.Errorf("I2C.cancel(): %w", err)
 		}
 	}
 
@@ -2578,9 +2713,17 @@ func (mod *I2C) Write(stop bool, addr uint8, out []byte, cnt uint16) error {
 // machine enters an unrecoverable state.
 func (mod *I2C) Read(rep bool, addr uint8, cnt uint16) ([]byte, error) {
 
-	if ok, err := mod.valid(); !ok {
+	unlock, err := mod.lock()
+	if nil != err {
 		return nil, err
 	}
+	defer unlock()
+
+	return mod.read(rep, addr, cnt)
+}
+
+// read implements Read. The caller must hold mcp.mu.
+func (mod *I2C) read(rep bool, addr uint8, cnt uint16) ([]byte, error) {
 
 	if cnt <= 0 {
 		return []byte{}, nil
@@ -2596,8 +2739,8 @@ func (mod *I2C) Read(rep bool, addr uint8, cnt uint16) ([]byte, error) {
 	}
 
 	if WordClr != stat.i2cState && i2cStateWritingNoStop != stat.i2cState {
-		if err := mod.I2C.Cancel(); nil != err {
-			return nil, fmt.Errorf("I2C.Cancel(): %w", err)
+		if err := mod.I2C.cancel(); nil != err {
+			return nil, fmt.Errorf("I2C.cancel(): %w", err)
 		}
 	}
 
@@ -2679,12 +2822,18 @@ func (mod *I2C) Read(rep bool, addr uint8, cnt uint16) ([]byte, error) {
 // See also I2CReadReg16() for 16-bit subaddressing devices.
 func (mod *I2C) ReadReg(addr uint8, reg uint8, cnt uint16) ([]byte, error) {
 
-	if err := mod.I2C.Write(false, addr, []byte{reg}, 1); nil != err {
-		return nil, fmt.Errorf("I2C.Write(): %w", err)
+	unlock, err := mod.lock()
+	if nil != err {
+		return nil, err
+	}
+	defer unlock()
+
+	if err := mod.I2C.write(false, addr, []byte{reg}, 1); nil != err {
+		return nil, fmt.Errorf("I2C.write(): %w", err)
 	}
 
-	if reg, err := mod.I2C.Read(true, addr, cnt); nil != err {
-		return nil, fmt.Errorf("I2C.Read(): %w", err)
+	if reg, err := mod.I2C.read(true, addr, cnt); nil != err {
+		return nil, fmt.Errorf("I2C.read(): %w", err)
 	} else {
 		return reg, nil
 	}
@@ -2703,17 +2852,23 @@ func (mod *I2C) ReadReg(addr uint8, reg uint8, cnt uint16) ([]byte, error) {
 // See also I2CReadReg() for 8-bit subaddressing devices.
 func (mod *I2C) ReadReg16(addr uint8, reg uint16, msb bool, cnt uint16) ([]byte, error) {
 
+	unlock, err := mod.lock()
+	if nil != err {
+		return nil, err
+	}
+	defer unlock()
+
 	buf := []byte{byte(reg & 0xFF), byte((reg >> 8) & 0xFF)}
 	if msb {
 		buf = []byte{buf[1], buf[0]}
 	}
 
-	if err := mod.I2C.Write(false, addr, buf, 2); nil != err {
-		return nil, fmt.Errorf("I2C.Write(): %w", err)
+	if err := mod.I2C.write(false, addr, buf, 2); nil != err {
+		return nil, fmt.Errorf("I2C.write(): %w", err)
 	}
 
-	if reg, err := mod.I2C.Read(true, addr, cnt); nil != err {
-		return nil, fmt.Errorf("I2C.Read(): %w", err)
+	if reg, err := mod.I2C.read(true, addr, cnt); nil != err {
+		return nil, fmt.Errorf("I2C.read(): %w", err)
 	} else {
 		return reg, nil
 	}
@@ -2726,9 +2881,11 @@ func (mod *I2C) ReadReg16(addr uint8, reg uint16, msb bool, cnt uint16) ([]byte,
 // machine status could not be read.
 func (mod *I2C) ReadReady() (bool, error) {
 
-	if ok, err := mod.valid(); !ok {
+	unlock, err := mod.lock()
+	if nil != err {
 		return false, err
 	}
+	defer unlock()
 
 	if stat, err := mod.status(); nil != err {
 		return false, fmt.Errorf("status(): %w", err)
@@ -2746,9 +2903,11 @@ func (mod *I2C) ReadReady() (bool, error) {
 // range is invalid.
 func (mod *I2C) Scan(start uint8, stop uint8) ([]uint8, error) {
 
-	if ok, err := mod.valid(); !ok {
+	unlock, err := mod.lock()
+	if nil != err {
 		return nil, err
 	}
+	defer unlock()
 
 	if start > stop {
 		return nil, fmt.Errorf("invalid address range [%d, %d]", start, stop)
@@ -2762,7 +2921,7 @@ func (mod *I2C) Scan(start uint8, stop uint8) ([]uint8, error) {
 	// when cnt is zero rather than returning early.
 	found := []byte{}
 	for addr := start; addr <= stop; addr++ {
-		if err := mod.I2C.Write(true, addr, []byte{0x00}, 1); nil == err {
+		if err := mod.I2C.write(true, addr, []byte{0x00}, 1); nil == err {
 			found = append(found, byte(addr))
 		}
 	}
