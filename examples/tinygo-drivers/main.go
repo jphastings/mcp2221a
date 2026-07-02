@@ -11,7 +11,7 @@ import (
 	"log"
 	"time"
 
-	mcp "github.com/ardnew/mcp2221a"
+	mcp "github.com/jphastings/mcp2221a"
 	"tinygo.org/x/drivers/seesaw"
 )
 
